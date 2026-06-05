@@ -189,6 +189,12 @@ def kill_project_processes(project_key: str, proj: dict) -> list[int]:
     if not script_names:
         return []
 
+    # Require the project's own folder path in the command line so a generic
+    # script name (e.g. "main.py") can never match an unrelated app elsewhere
+    # on the machine. Launch bats always invoke python by absolute path, so the
+    # project directory is present in every legitimate command line.
+    proj_path = (proj.get("path") or "").lower()
+
     my_pid = os.getpid()
     all_procs = get_running_python_processes()
     killed: list[int] = []
@@ -202,6 +208,9 @@ def kill_project_processes(project_key: str, proj: dict) -> list[int]:
             continue
         # Never kill admin_bot
         if "admin_bot" in cmd:
+            continue
+        # Only touch processes that actually belong to THIS project's folder
+        if proj_path and proj_path not in cmd:
             continue
 
         for script in script_names:
