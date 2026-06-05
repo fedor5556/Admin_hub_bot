@@ -1,0 +1,16 @@
+{
+    "bus": {
+        "name": "Cyprus Bus Tracker",
+        "path": "../Cyp_Bus_Bot",
+        "repo": "https://github.com/fedor5556/Cyp_Bus_Bot.git",
+        "emoji": "🚌",
+        "scripts": ["monitor.py", "predict_eta.py"]
+    },
+    "transcriber": {
+        "name": "Voice Transcriber",
+        "path": "../Constan_transcriber_telegram_bot",
+        "repo": "https://github.com/fedor5556/Constan_transcriber_telegram_bot.git",
+        "emoji": "🎙️",
+        "scripts": ["main.py"]
+    }
+}
