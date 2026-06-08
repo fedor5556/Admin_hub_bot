@@ -375,21 +375,24 @@ def build_actions_keyboard(project_key: str) -> InlineKeyboardMarkup:
     row1 = [
         InlineKeyboardButton("\U0001f4cb Logs", callback_data="action_logs"),
         InlineKeyboardButton("\U0001f4ca Status", callback_data="action_status"),
-        InlineKeyboardButton("\U0001f680 Update", callback_data="action_update"),
     ]
     row2 = [
+        InlineKeyboardButton("\u25b6\ufe0f Start", callback_data="action_start"),
         InlineKeyboardButton("\U0001f6d1 Stop", callback_data="action_stop"),
         InlineKeyboardButton("\U0001f504 Restart", callback_data="action_restart"),
-        InlineKeyboardButton("\U0001f4e6 Backup", callback_data="action_backup"),
     ]
     row3 = [
+        InlineKeyboardButton("\U0001f680 Update", callback_data="action_update"),
+        InlineKeyboardButton("\U0001f4e6 Backup", callback_data="action_backup"),
+    ]
+    row4 = [
         InlineKeyboardButton("\U0001f4c8 DB Stats", callback_data="action_dbstats"),
         InlineKeyboardButton("\u23ea Rollback", callback_data="action_rollback"),
     ]
-    row4 = [
+    row5 = [
         InlineKeyboardButton("\u25c0\ufe0f Back to Projects", callback_data="back_to_projects"),
     ]
-    return InlineKeyboardMarkup([row1, row2, row3, row4])
+    return InlineKeyboardMarkup([row1, row2, row3, row4, row5])
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +490,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/logs \u2014 Show project log files\n"
         "/status \u2014 Project status details\n"
         "/update \u2014 Git pull + pip install + restart\n"
+        "/launch \u2014 Start project (without killing first)\n"
         "/stop \u2014 Kill project processes\n"
         "/restart \u2014 Kill + relaunch (no git)\n"
         "/rollback \u2014 Revert last commit + restart\n"
@@ -646,6 +650,32 @@ async def do_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await target.reply_text(text, parse_mode="HTML")
     logger.info("STOP: %s, killed %s", key, killed)
+
+
+async def do_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Launch a project WITHOUT killing first. Warns if it is already running
+    (so it can never spin up a duplicate set of processes)."""
+    key, proj = await _require_project(update)
+    if not proj:
+        return
+
+    target = update.callback_query.message if update.callback_query else update.message
+
+    already = check_scripts_running(proj)
+    if already:
+        await target.reply_text(
+            "⚠️ <b>{}</b> is already running ({}).\nUse \U0001f504 Restart to relaunch it.".format(
+                proj["name"], ", ".join(already)),
+            parse_mode="HTML",
+        )
+        logger.info("START skipped for %s (already running: %s)", key, already)
+        return
+
+    launched = launch_project(proj)
+    text = "▶️ <b>{}</b> {}".format(
+        proj["name"], "started." if launched else "FAILED to start.")
+    await target.reply_text(text, parse_mode="HTML")
+    logger.info("START: %s, launched %s", key, launched)
 
 
 async def do_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -854,6 +884,12 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def cmd_launch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /start is reserved for the projects menu, so the launch command is /launch
+    await do_start(update, context)
+
+
+@admin_only
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await do_stop(update, context)
 
@@ -942,6 +978,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "logs": do_logs,
             "status": do_status,
             "update": do_update,
+            "start": do_start,
             "stop": do_stop,
             "restart": do_restart,
             "rollback": do_rollback,
@@ -990,6 +1027,7 @@ def main():
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("launch", cmd_launch))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("restart", cmd_restart))
     app.add_handler(CommandHandler("rollback", cmd_rollback))

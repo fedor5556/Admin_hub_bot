@@ -88,3 +88,33 @@ async def test_project_selection_callback(mock_update, mock_context):
     mock_update.callback_query.edit_message_text.assert_called_once()
     args, kwargs = mock_update.callback_query.edit_message_text.call_args
     assert "Test Project" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_start_launches_when_not_running(mock_update, mock_context, monkeypatch):
+    """Start should launch the project when nothing is running."""
+    admin_bot.active_project[12345] = "test_proj"
+    monkeypatch.setattr(admin_bot, "check_scripts_running", lambda proj: [])
+    launched = {"v": False}
+    monkeypatch.setattr(admin_bot, "launch_project", lambda proj: launched.update(v=True) or True)
+
+    await admin_bot.do_start(mock_update, mock_context)
+
+    assert launched["v"] is True
+    args, _ = mock_update.message.reply_text.call_args
+    assert "started" in args[0]
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_duplicate_when_running(mock_update, mock_context, monkeypatch):
+    """Start must NOT launch a second copy when the project is already running."""
+    admin_bot.active_project[12345] = "test_proj"
+    monkeypatch.setattr(admin_bot, "check_scripts_running", lambda proj: ["main.py"])
+    launched = {"v": False}
+    monkeypatch.setattr(admin_bot, "launch_project", lambda proj: launched.update(v=True) or True)
+
+    await admin_bot.do_start(mock_update, mock_context)
+
+    assert launched["v"] is False  # no duplicate launch
+    args, _ = mock_update.message.reply_text.call_args
+    assert "already running" in args[0]
