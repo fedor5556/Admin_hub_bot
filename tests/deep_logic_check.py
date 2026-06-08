@@ -79,11 +79,11 @@ def fake_run(args, *a, **k):
 
 my_pid = os.getpid()
 synthetic = [
-    {"pid": my_pid,  "cmd": r"python admin_bot.py"},                 # self + admin -> must skip
-    {"pid": 900001,  "cmd": r"C:\Projects\Admin_hub\venv\python.exe admin_bot.py"},  # admin -> skip
-    {"pid": 900002,  "cmd": r"C:\Projects\Cyp_Bus_Bot\venv\python.exe src\monitor.py"},      # bus -> KILL
-    {"pid": 900003,  "cmd": r"C:\Projects\Cyp_Bus_Bot\venv\python.exe src\predict_eta.py"},  # bus -> KILL
-    {"pid": 900004,  "cmd": r"C:\SomeOtherApp\venv\python.exe app.py"},  # unrelated -> skip
+    {"pid": my_pid,  "exe": r"C:\Py\python.exe", "cmd": r"python admin_bot.py"},          # self + admin -> skip
+    {"pid": 900001,  "exe": r"C:\Projects\Admin_hub\venv\Scripts\python.exe", "cmd": r"...\python.exe admin_bot.py"},  # admin -> skip
+    {"pid": 900002,  "exe": r"C:\Projects\Cyp_Bus_Bot\venv\Scripts\python.exe", "cmd": r"C:\Projects\Cyp_Bus_Bot\venv\Scripts\python.exe -u src\monitor.py"},  # bus abs -> KILL
+    {"pid": 900003,  "exe": r"C:\Projects\Cyp_Bus_Bot\venv\Scripts\python.exe", "cmd": r".\venv\Scripts\python.exe -u src\predict_eta.py"},  # bus RELATIVE cmd -> KILL via exe
+    {"pid": 900004,  "exe": r"C:\SomeOtherApp\venv\Scripts\python.exe", "cmd": r".\venv\Scripts\python.exe app.py"},  # unrelated -> skip
 ]
 
 admin_bot.subprocess.run = fake_run
@@ -92,7 +92,8 @@ try:
     bus = {"path": r"C:\Projects\Cyp_Bus_Bot", "scripts": ["monitor.py", "predict_eta.py"]}
     killed_pids.clear()
     admin_bot.kill_project_processes("bus", bus)
-    check("kills the 2 bus scripts", set(killed_pids) == {900002, 900003}, f"targeted={sorted(killed_pids)}")
+    check("kills both bus scripts (incl. RELATIVE-path launch)", set(killed_pids) == {900002, 900003}, f"targeted={sorted(killed_pids)}")
+    check("  matches relative-cmd process via ExecutablePath", 900003 in killed_pids)
     check("  never kills self", my_pid not in killed_pids)
     check("  never kills admin_bot", 900001 not in killed_pids)
     check("  never kills unrelated app", 900004 not in killed_pids)
@@ -105,8 +106,8 @@ finally:
 # ---------------------------------------------------------------------------
 print("\n=== 4. Generic 'main.py' collision risk ===")
 risk_procs = [
-    {"pid": 800001, "cmd": r"C:\Projects\Constan_transcriber_telegram_bot\venv\python.exe main.py"},  # intended
-    {"pid": 800002, "cmd": r"C:\Users\Admin\SomeUnrelatedProject\python.exe main.py"},                # COLLATERAL
+    {"pid": 800001, "exe": r"C:\Projects\Constan_transcriber_telegram_bot\venv\Scripts\python.exe", "cmd": r".\venv\Scripts\python.exe -u src\main.py"},  # intended (relative cmd)
+    {"pid": 800002, "exe": r"C:\Users\Admin\SomeUnrelatedProject\venv\Scripts\python.exe", "cmd": r"python main.py"},                                       # COLLATERAL
 ]
 admin_bot.subprocess.run = fake_run
 admin_bot.get_running_python_processes = lambda: risk_procs

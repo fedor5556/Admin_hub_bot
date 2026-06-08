@@ -160,11 +160,16 @@ def run_ps(script: str, timeout: int = 15) -> str:
 
 
 def get_running_python_processes() -> list[dict]:
-    """Return list of dicts with PID + CommandLine for all python.exe processes."""
+    """Return list of dicts with PID, ExecutablePath and CommandLine for python procs.
+
+    ExecutablePath is always absolute (e.g. ...\\<Project>\\venv\\Scripts\\python.exe),
+    so it reliably identifies which project a process belongs to even when the launch
+    command line used a relative path like ".\\venv\\Scripts\\python.exe".
+    """
     ps_script = (
         "Get-CimInstance Win32_Process -Filter \"Name LIKE '%python%'\" "
-        "| Select-Object ProcessId, CommandLine "
-        "| ForEach-Object { $_.ProcessId.ToString() + '|||' + $_.CommandLine }"
+        "| ForEach-Object { $_.ProcessId.ToString() + '|||' + "
+        "[string]$_.ExecutablePath + '|||' + [string]$_.CommandLine }"
     )
     raw = run_ps(ps_script, timeout=15)
     results = []
@@ -172,9 +177,16 @@ def get_running_python_processes() -> list[dict]:
         line = line.strip()
         if "|||" not in line:
             continue
-        pid_str, cmdline = line.split("|||", 1)
+        parts = line.split("|||", 2)  # limit so '|||' inside a command line is preserved
+        if len(parts) < 3:
+            continue
+        pid_str, exe, cmdline = parts
         try:
-            results.append({"pid": int(pid_str.strip()), "cmd": cmdline.strip()})
+            results.append({
+                "pid": int(pid_str.strip()),
+                "exe": exe.strip(),
+                "cmd": cmdline.strip(),
+            })
         except ValueError:
             continue
     return results
@@ -202,6 +214,7 @@ def kill_project_processes(project_key: str, proj: dict) -> list[int]:
     for proc in all_procs:
         pid = proc["pid"]
         cmd = proc["cmd"].lower()
+        exe = proc.get("exe", "").lower()
 
         # Never kill self
         if pid == my_pid:
@@ -209,8 +222,11 @@ def kill_project_processes(project_key: str, proj: dict) -> list[int]:
         # Never kill admin_bot
         if "admin_bot" in cmd:
             continue
-        # Only touch processes that actually belong to THIS project's folder
-        if proj_path and proj_path not in cmd:
+        # Only touch processes that actually belong to THIS project's folder.
+        # Check both the command line AND the absolute executable path, so a
+        # relative-path launch can't slip past and a generic script name
+        # (e.g. main.py) elsewhere can't be matched.
+        if proj_path and proj_path not in cmd and proj_path not in exe:
             continue
 
         for script in script_names:
