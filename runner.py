@@ -237,7 +237,7 @@ class Runner:
     def _load_state(self):
         desired = {key: True for key in self.projects}  # autostart by default
         try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
+            with open(STATE_FILE, "r", encoding="utf-8-sig") as f:
                 for key, want in json.load(f).items():
                     if key in desired:
                         desired[key] = bool(want)
@@ -368,7 +368,8 @@ def main():
         return 0
 
     try:
-        with open(REGISTRY_FILE, "r", encoding="utf-8") as f:
+        # utf-8-sig: humans edit this file, and Notepad/PowerShell write a BOM
+        with open(REGISTRY_FILE, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
         projects = validate_registry(raw, BASE_DIR)
     except Exception as exc:
