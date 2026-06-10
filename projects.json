@@ -4,13 +4,15 @@
         "path": "../Cyp_Bus_Bot",
         "repo": "https://github.com/fedor5556/Cyp_Bus_Bot.git",
         "emoji": "🚌",
-        "scripts": ["monitor.py", "predict_eta.py"]
+        "scripts": ["monitor.py", "predict_eta.py"],
+        "env_keys": ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "ADMIN_TELEGRAM_ID"]
     },
     "transcriber": {
         "name": "Voice Transcriber",
         "path": "../Constan_transcriber_telegram_bot",
         "repo": "https://github.com/fedor5556/Constan_transcriber_telegram_bot.git",
         "emoji": "🎙️",
-        "scripts": ["main.py"]
+        "scripts": ["main.py"],
+        "env_keys": ["PUBLIC_BOT_TOKEN", "GROQ_API_KEY"]
     }
 }

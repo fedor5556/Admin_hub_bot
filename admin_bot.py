@@ -367,6 +367,32 @@ def pip_install(project_path: str) -> str:
         return "[pip error: {}]".format(exc)
 
 
+def check_env_file(proj: dict):
+    """Compare a project's .env against its required key names from
+    projects.json ("env_keys"). Returns (present, missing, error) - key NAMES
+    only, values are never surfaced. Returns None if no spec is defined."""
+    required = proj.get("env_keys", [])
+    if not required:
+        return None
+    env_path = os.path.join(proj["path"], ".env")
+    if not os.path.isfile(env_path):
+        return ([], list(required), "no .env file at all")
+    keys = set()
+    try:
+        with open(env_path, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    if val.strip():  # an empty value counts as missing
+                        keys.add(key.strip())
+    except OSError as exc:
+        return ([], list(required), str(exc))
+    present = [k for k in required if k in keys]
+    missing = [k for k in required if k not in keys]
+    return (present, missing, None)
+
+
 def read_log_tail(filepath: str, lines: int = 15) -> str:
     """Read last N lines of a log file.
 
@@ -511,6 +537,79 @@ async def cmd_hub_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @admin_only
+async def cmd_env_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check every project's .env for required keys (names only, no values)."""
+    if not projects:
+        load_projects()
+    lines = ["\U0001f511 <b>.env check</b> (key names only, values never shown)", ""]
+    for key, proj in projects.items():
+        result = check_env_file(proj)
+        if result is None:
+            lines.append("⚪ {}: no env_keys defined in projects.json".format(proj["name"]))
+            continue
+        present, missing, err = result
+        if err:
+            lines.append("\U0001f534 {}: {} (need: {})".format(
+                proj["name"], err, ", ".join(missing)))
+        elif missing:
+            lines.append("\U0001f534 {}: MISSING {}".format(proj["name"], ", ".join(missing)))
+        else:
+            lines.append("✅ {}: all {} required keys set".format(proj["name"], len(present)))
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+@admin_only
+async def cmd_setup_autostart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Register START_SERVER.bat to run at every Windows logon.
+
+    Writes a tiny launcher into the current user's Startup folder - needs no
+    admin rights and no hands on the machine. Caveat: Startup items fire at
+    LOGON, so the server account must log in after a reboot (enable Windows
+    auto-login via netplwiz once if the machine reboots unattended)."""
+    startup_dir = os.path.join(os.environ.get("APPDATA", ""),
+                               "Microsoft", "Windows", "Start Menu",
+                               "Programs", "Startup")
+    if not os.path.isdir(startup_dir):
+        await update.message.reply_text("❌ Startup folder not found:\n{}".format(startup_dir))
+        return
+    target = os.path.join(BASE_DIR, "START_SERVER.bat")
+    shim_path = os.path.join(startup_dir, "Server_AutoStart.bat")
+    try:
+        with open(shim_path, "w", encoding="ascii", errors="replace") as f:
+            f.write('@echo off\nstart "" "{}"\n'.format(target))
+        await update.message.reply_text(
+            "✅ <b>Auto-start registered.</b>\n\n"
+            "Created: <code>{}</code>\n\n"
+            "START_SERVER.bat now launches at every Windows logon, so the whole "
+            "system survives reboots.\n\n"
+            "⚠️ Startup items fire at <b>logon</b>: if the PC reboots to the "
+            "login screen, nothing starts until someone logs in. Enable auto-login "
+            "(Win+R → <code>netplwiz</code>) once for fully unattended recovery.\n\n"
+            "Undo with /remove_autostart.".format(shim_path),
+            parse_mode="HTML")
+        logger.info("Auto-start registered at %s", shim_path)
+    except OSError as exc:
+        await update.message.reply_text("❌ Could not register auto-start: {}".format(exc))
+
+
+@admin_only
+async def cmd_remove_autostart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Remove the Startup-folder launcher created by /setup_autostart."""
+    shim_path = os.path.join(os.environ.get("APPDATA", ""),
+                             "Microsoft", "Windows", "Start Menu",
+                             "Programs", "Startup", "Server_AutoStart.bat")
+    if not os.path.isfile(shim_path):
+        await update.message.reply_text("⚪ No auto-start entry found.")
+        return
+    try:
+        os.remove(shim_path)
+        await update.message.reply_text("✅ Auto-start removed.")
+        logger.info("Auto-start removed from %s", shim_path)
+    except OSError as exc:
+        await update.message.reply_text("❌ Could not remove it: {}".format(exc))
+
+
+@admin_only
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show all available commands."""
     text = (
@@ -519,7 +618,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start, /projects \u2014 Select a project\n"
         "/hub_status \u2014 Overview of all projects\n"
         "/hub_logs \u2014 Admin Hub's own log\n"
-        "/hub_update \u2014 Self-update Admin Hub via Git\n"
+        "/hub_update \u2014 Self-update Admin Hub via Git (auto-rollback if it fails)\n"
+        "/env_check \u2014 Verify every project's .env keys (names only)\n"
+        "/setup_autostart \u2014 Launch everything at Windows logon\n"
+        "/remove_autostart \u2014 Undo auto-start\n"
         "/help \u2014 This message\n\n"
         "<b>Project-Level (select a project first):</b>\n"
         "/logs \u2014 Show project log files\n"
@@ -1071,6 +1173,9 @@ def main():
     app.add_handler(CommandHandler("hub_status", cmd_hub_status))
     app.add_handler(CommandHandler("hub_logs", cmd_hub_logs))
     app.add_handler(CommandHandler("hub_update", cmd_hub_update))
+    app.add_handler(CommandHandler("env_check", cmd_env_check))
+    app.add_handler(CommandHandler("setup_autostart", cmd_setup_autostart))
+    app.add_handler(CommandHandler("remove_autostart", cmd_remove_autostart))
     app.add_handler(CommandHandler("help", cmd_help))
 
     # Project-level commands

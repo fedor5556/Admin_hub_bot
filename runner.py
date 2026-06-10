@@ -37,15 +37,19 @@ import json
 import logging
 import logging.handlers
 import os
+import shutil
 import socket
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REGISTRY_FILE = os.path.join(BASE_DIR, "runner_projects.json")
 STATE_FILE = os.path.join(BASE_DIR, "runner_state.json")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+ROLLBACK_FLAG = os.path.join(LOG_DIR, "update_rollback.flag")
 
 POLL_SECONDS = 5            # reconcile loop interval
 ADOPT_SCAN_SECONDS = 60     # how often to rescan the OS for adopted processes
@@ -55,6 +59,14 @@ RESTART_WINDOW = 1800
 COOLDOWN_SECONDS = 1800     # crash-loop cooldown
 SINGLE_INSTANCE_PORT = 47631
 CREATE_NO_WINDOW = 0x08000000
+CREATE_NEW_CONSOLE = 0x00000010
+
+# Admin Hub supervision: the Hub watches everything else; the runner is the
+# safety net for the Hub itself.
+HUB_SCRIPT = "admin_bot.py"
+HUB_KEY = ("_hub", HUB_SCRIPT)
+HUB_STARTUP_GRACE = 120     # let START_SERVER / UPDATE_ADMIN bring the Hub up
+HEARTBEAT_SECONDS = 24 * 3600
 
 # ---------------------------------------------------------------------------
 # Logging (sole writer of logs/runner.log - see TELEGRAM_BOT_NOTE.md)
@@ -71,6 +83,48 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
                     handlers=_handlers)
 logger = logging.getLogger("Runner")
+
+
+# ---------------------------------------------------------------------------
+# Telegram alerts (crash notifications + heartbeat)
+# ---------------------------------------------------------------------------
+def read_env(path):
+    """Minimal KEY=VALUE .env parser - no dependencies, BOM-tolerant."""
+    vals = {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    vals[key.strip()] = val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return vals
+
+
+_env = read_env(os.path.join(BASE_DIR, ".env"))
+ALERT_TOKEN = _env.get("ADMIN_BOT_TOKEN", "")
+ALERT_IDS = [x.strip() for x in _env.get("ADMIN_TELEGRAM_ID", "").split(",")
+             if x.strip().isdigit()]
+
+
+def send_alert(text):
+    """DM every admin via the admin bot (plain HTTPS, no library). Telegram
+    only allows DMs to users who have already messaged the bot - true for
+    every admin by definition. Best-effort: an alert failure must never
+    crash or stall the supervisor."""
+    if not ALERT_TOKEN or not ALERT_IDS:
+        return
+    for chat_id in ALERT_IDS:
+        try:
+            data = urllib.parse.urlencode(
+                {"chat_id": chat_id, "text": text}).encode()
+            urllib.request.urlopen(
+                "https://api.telegram.org/bot{}/sendMessage".format(ALERT_TOKEN),
+                data=data, timeout=10).read()
+        except Exception as exc:
+            logger.warning("Alert to %s failed: %s", chat_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +285,13 @@ class Runner:
         self.death_time = {}      # (key, base) -> monotonic time of death
         self.restarts = {}        # (key, base) -> [monotonic timestamps]
         self.cooldown_until = {}  # (key, base) -> monotonic time
+        self.started_once = set() # (key, base) that ran at least once (so a
+                                  # boot start is not alerted as a crash)
         self.last_scan = 0.0
+        self.start_time = time.monotonic()
+        self.last_heartbeat = time.monotonic()
+        self.hub_alive = True     # optimistic until the first scan says otherwise
+        self.hub_dir_norm = norm_dir(BASE_DIR)
         self.desired = self._load_state()
 
     def _load_state(self):
@@ -294,13 +354,16 @@ class Runner:
             child = spawn_process(proj, spec)
             self.children[(key, spec["base"])] = child
             self.death_time.pop((key, spec["base"]), None)
+            self.started_once.add((key, spec["base"]))
             logger.info("Started %s / %s (PID %d)", proj["name"], spec["base"], child.pid)
         except Exception as exc:
             logger.error("Failed to start %s / %s: %s", proj["name"], spec["base"], exc)
 
     def adopt_scan(self):
         """Find managed processes we didn't spawn (legacy launches, pre-restart
-        survivors) so we never start duplicates."""
+        survivors) so we never start duplicates. Also notes whether the Admin
+        Hub itself is alive (checked on this slower cadence on purpose - a
+        process scan spawns a PowerShell)."""
         self.adopted.clear()
         procs = list_python_processes()
         for key, proj in self.projects.items():
@@ -309,6 +372,9 @@ class Runner:
                 base = belongs_to(proc["cmd"], proc["exe"], proj["dir_norm"], basenames)
                 if base and (key, base) not in self.children:
                     self.adopted[(key, base)] = proc["pid"]
+        self.hub_alive = any(
+            belongs_to(p["cmd"], p["exe"], self.hub_dir_norm, [HUB_SCRIPT])
+            for p in procs)
         self.last_scan = time.monotonic()
 
     # -- reconcile ------------------------------------------------------------
@@ -336,6 +402,10 @@ class Runner:
             logger.error("%s/%s crash-looping (%d restarts in %d min) - cooling "
                          "down for %d min", key, base, MAX_RESTARTS,
                          RESTART_WINDOW // 60, COOLDOWN_SECONDS // 60)
+            send_alert("🔴 {} / {} keeps crashing ({} restarts in {} min) - "
+                       "paused for {} min. Check /logs.".format(
+                           key, base, MAX_RESTARTS, RESTART_WINDOW // 60,
+                           COOLDOWN_SECONDS // 60))
             return False
         history.append(now)
         self.restarts[(key, base)] = history
@@ -355,7 +425,59 @@ class Runner:
                 self.death_time.setdefault((key, base), time.monotonic() - RESTART_DELAY)
                 if self._may_restart(key, base):
                     logger.info("Restarting %s / %s", proj["name"], base)
+                    if (key, base) in self.started_once:
+                        send_alert("♻️ {} / {} exited unexpectedly - "
+                                   "restarting it.".format(proj["name"], base))
                     self._spawn(key, proj, spec)
+        self.supervise_hub()
+        self.maybe_heartbeat()
+
+    # -- the Hub's own safety net ---------------------------------------------
+    def supervise_hub(self):
+        """Relaunch the Admin Hub if it is down. The Hub manages everything
+        else; this covers the one process nothing else watches. The startup
+        grace period avoids double-launching while START_SERVER.bat or
+        UPDATE_ADMIN.bat are still bringing the Hub up themselves."""
+        if self.hub_alive:
+            return
+        if time.monotonic() - self.start_time < HUB_STARTUP_GRACE:
+            return
+        if not self._may_restart(*HUB_KEY):
+            return
+        logger.warning("Admin Hub is down - relaunching LAUNCH_ADMIN.bat")
+        send_alert("⚠️ The Admin Hub was down - the runner is relaunching it.")
+        try:
+            subprocess.Popen(
+                ["cmd.exe", "/c", os.path.join(BASE_DIR, "LAUNCH_ADMIN.bat")],
+                cwd=BASE_DIR, creationflags=CREATE_NEW_CONSOLE)
+            self.hub_alive = True  # optimistic; next scan re-checks
+        except Exception as exc:
+            logger.error("Failed to relaunch the Admin Hub: %s", exc)
+
+    def maybe_heartbeat(self):
+        if time.monotonic() - self.last_heartbeat < HEARTBEAT_SECONDS:
+            return
+        self.last_heartbeat = time.monotonic()
+        lines = ["💓 Daily heartbeat ({})".format(socket.gethostname())]
+        for key, proj in self.projects.items():
+            want = self.desired.get(key)
+            alive = sum(1 for spec in proj["processes"]
+                        if self._alive(key, spec["base"]))
+            total = len(proj["processes"])
+            if want:
+                mark = "✅" if alive == total else "⚠️"
+                lines.append("{} {}: {}/{} running".format(mark, proj["name"], alive, total))
+            else:
+                lines.append("🛑 {}: stopped (intentional)".format(proj["name"]))
+        lines.append("{} Admin Hub: {}".format(
+            "✅" if self.hub_alive else "🔴",
+            "running" if self.hub_alive else "DOWN"))
+        try:
+            free_gb = shutil.disk_usage(BASE_DIR).free / 1024 ** 3
+            lines.append("💾 Disk free: {:.0f} GB".format(free_gb))
+        except OSError:
+            pass
+        send_alert("\n".join(lines))
 
 
 def main():
@@ -378,6 +500,22 @@ def main():
 
     logger.info("Runner starting - managing: %s",
                 ", ".join(p["name"] for p in projects.values()) or "(nothing)")
+
+    # If the last /hub_update failed and was rolled back, UPDATE_ADMIN.bat
+    # leaves a flag - report it now that we (the rolled-back version) are up.
+    try:
+        if os.path.exists(ROLLBACK_FLAG):
+            with open(ROLLBACK_FLAG, "r", encoding="utf-8-sig") as f:
+                send_alert("🔴 Hub update FAILED and was rolled back:\n"
+                           + f.read().strip())
+            os.remove(ROLLBACK_FLAG)
+    except OSError:
+        pass
+
+    send_alert("🟢 Runner started on {} - managing: {}".format(
+        socket.gethostname(),
+        ", ".join(p["name"] for p in projects.values()) or "(nothing)"))
+
     runner = Runner(projects)
     runner.adopt_scan()
 
