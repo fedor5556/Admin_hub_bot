@@ -11,6 +11,7 @@ import asyncio
 import datetime
 import json
 import logging
+import logging.handlers
 import os
 import shutil
 import sqlite3
@@ -53,15 +54,29 @@ PROJECTS_JSON = os.path.join(BASE_DIR, "projects.json")
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+# The bot is the ONLY writer to its log file (the launcher must NOT Tee-Object
+# into it — two writers on one file is a guaranteed sharing violation on
+# Windows). delay=True + the try/except guarantee a locked or unwritable log
+# file can never prevent the bot from starting: worst case we run console-only.
 LOG_FILE = os.path.join(LOG_DIR, "admin_bot.log")
+_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+try:
+    _handlers.append(
+        logging.handlers.RotatingFileHandler(
+            LOG_FILE, maxBytes=2_000_000, backupCount=3,
+            encoding="utf-8", delay=True,
+        )
+    )
+except OSError as _exc:
+    print("[WARN] Cannot open {}: {} - logging to console only".format(LOG_FILE, _exc))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
+    handlers=_handlers,
 )
+# httpx logs every Telegram API request at INFO - including the bot token in
+# the URL. Keep it out of the log file.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("AdminHub")
 
 # ---------------------------------------------------------------------------
@@ -340,15 +355,22 @@ def pip_install(project_path: str) -> str:
 
 
 def read_log_tail(filepath: str, lines: int = 15) -> str:
-    """Read last N lines of a log file, stripping null bytes."""
+    """Read last N lines of a log file.
+
+    Sniffs the BOM to pick the encoding: old Tee-Object logs are UTF-16 LE,
+    everything written by Python logging is UTF-8. (Decoding UTF-8 as UTF-16
+    does not raise - it silently produces CJK garbage - so trying UTF-16
+    first is not safe.) Binary mode also avoids sharing issues with files
+    another process holds open for writing.
+    """
     try:
-        try:
-            with open(filepath, "r", encoding="utf-16") as f:
-                content = f.read()
-        except UnicodeError:
-            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-                
+        with open(filepath, "rb") as f:
+            raw = f.read()
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            content = raw.decode("utf-16", errors="replace")
+        else:
+            content = raw.decode("utf-8", errors="replace")
+
         all_lines = content.splitlines()
         tail = all_lines[-lines:]
         return "\n".join(tail)
