@@ -220,7 +220,10 @@ def kill_project_processes(project_key: str, proj: dict) -> list[int]:
     # script name (e.g. "main.py") can never match an unrelated app elsewhere
     # on the machine. Launch bats always invoke python by absolute path, so the
     # project directory is present in every legitimate command line.
-    proj_path = (proj.get("path") or "").lower()
+    # The trailing backslash prevents prefix collisions: 'd:\bus\' can never
+    # match a process living in 'd:\bus2\'.
+    proj_path = (proj.get("path") or "").lower().rstrip("\\/")
+    proj_prefix = (proj_path + "\\") if proj_path else ""
 
     my_pid = os.getpid()
     all_procs = get_running_python_processes()
@@ -234,14 +237,14 @@ def kill_project_processes(project_key: str, proj: dict) -> list[int]:
         # Never kill self
         if pid == my_pid:
             continue
-        # Never kill admin_bot
-        if "admin_bot" in cmd:
+        # Never kill admin_bot or the central runner
+        if "admin_bot" in cmd or "runner.py" in cmd:
             continue
         # Only touch processes that actually belong to THIS project's folder.
         # Check both the command line AND the absolute executable path, so a
         # relative-path launch can't slip past and a generic script name
         # (e.g. main.py) elsewhere can't be matched.
-        if proj_path and proj_path not in cmd and proj_path not in exe:
+        if proj_prefix and proj_prefix not in cmd and proj_prefix not in exe:
             continue
 
         for script in script_names:
@@ -314,13 +317,23 @@ def get_db_total_size(project_path: str) -> str:
 
 
 def check_scripts_running(proj: dict) -> list[str]:
-    """Return list of script names that are currently running."""
+    """Return list of script names that are currently running.
+
+    Scoped to the project's own folder (trailing backslash, like
+    kill_project_processes) so another project's generic 'main.py' is never
+    reported as this project's process."""
     script_names = proj.get("scripts", [])
+    proj_path = (proj.get("path") or "").lower().rstrip("\\/")
+    proj_prefix = (proj_path + "\\") if proj_path else ""
     all_procs = get_running_python_processes()
     running = []
     for script in script_names:
         for proc in all_procs:
-            if script.lower() in proc["cmd"].lower():
+            cmd = proc["cmd"].lower()
+            exe = proc.get("exe", "").lower()
+            if proj_prefix and proj_prefix not in cmd and proj_prefix not in exe:
+                continue
+            if script.lower() in cmd:
                 running.append(script)
                 break
     return running
@@ -663,6 +676,21 @@ async def do_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     target = update.callback_query.message if update.callback_query else update.message
+
+    # Tell the central runner this stop is intentional, BEFORE killing, so it
+    # never auto-restarts the project. Markers live in logs/ because that
+    # folder is gitignored in every project. Best-effort: a marker failure
+    # must never block the stop itself.
+    try:
+        marker_dir = os.path.join(proj["path"], "logs")
+        os.makedirs(marker_dir, exist_ok=True)
+        start_marker = os.path.join(marker_dir, "runner.start")
+        if os.path.exists(start_marker):
+            os.remove(start_marker)
+        with open(os.path.join(marker_dir, "runner.stop"), "w", encoding="utf-8") as f:
+            f.write("stop requested via Admin Hub\n")
+    except OSError as exc:
+        logger.warning("Could not write runner stop marker for %s: %s", key, exc)
 
     killed = kill_project_processes(key, proj)
     if killed:

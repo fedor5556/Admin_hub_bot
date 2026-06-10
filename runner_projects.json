@@ -1,0 +1,18 @@
+{
+    "_README": "Registry for runner.py (the hidden process supervisor). Paths are relative to this folder, same sibling convention as projects.json. To add a project: add an entry here AND in projects.json (Hub menus/kill-matching), then drop the standard COMPLETE_LAUNCH.bat shim into the project. Script file names must be unique within a project; project folder names must not be prefixes of each other.",
+    "bus": {
+        "name": "Cyprus Bus Tracker",
+        "path": "../Cyp_Bus_Bot",
+        "processes": [
+            {"script": "src/monitor.py", "args": []},
+            {"script": "src/analysis/predict_eta.py", "args": ["--bot"]}
+        ]
+    },
+    "transcriber": {
+        "name": "Voice Transcriber",
+        "path": "../Constan_transcriber_telegram_bot",
+        "processes": [
+            {"script": "src/main.py", "args": []}
+        ]
+    }
+}
