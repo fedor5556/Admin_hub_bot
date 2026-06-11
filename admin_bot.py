@@ -9,6 +9,7 @@ python-telegram-bot v22.6 | Windows 11 | Python 3.12+
 
 import asyncio
 import datetime
+import html
 import json
 import logging
 import logging.handlers
@@ -132,6 +133,13 @@ def admin_only(func):
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
+def esc(text) -> str:
+    """HTML-escape command output / log text before embedding it in a
+    parse_mode=HTML message. Raw pip/git output contains things like
+    'cffi<4,>=2.0', which Telegram rejects as an unsupported HTML tag."""
+    return html.escape(str(text), quote=False)
+
+
 def get_active(user_id: int) -> tuple[str | None, dict | None]:
     """Return (project_key, project_dict) or (None, None)."""
     key = active_project.get(user_id)
@@ -497,7 +505,7 @@ async def cmd_hub_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         lines.append("{} <b>{}</b>".format(emoji, proj["name"]))
         lines.append("   {} Path: {}".format(path_icon, "exists" if exists else "MISSING"))
-        lines.append("   \U0001f4dd Commit: {}".format(commit))
+        lines.append("   \U0001f4dd Commit: {}".format(esc(commit)))
         if running:
             lines.append("   {} Running: {}".format(status_icon, ", ".join(running)))
         else:
@@ -515,7 +523,7 @@ async def cmd_hub_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     tail = read_log_tail(LOG_FILE, lines=30)
-    text = "\U0001f4cb <b>Hub Log</b> (last 30 lines)\n\n<pre>{}</pre>".format(tail[:3500])
+    text = "\U0001f4cb <b>Hub Log</b> (last 30 lines)\n\n<pre>{}</pre>".format(esc(tail[:3500]))
     await update.message.reply_text(text, parse_mode="HTML")
 
 
@@ -678,7 +686,7 @@ async def do_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = ["\U0001f4cb <b>{} Logs</b>\n".format(proj["name"])]
     for lf in sorted(log_files):
         tail = read_log_tail(str(lf), lines=15)
-        parts.append("<b>{}</b>\n<pre>{}</pre>\n".format(lf.name, tail[:1500]))
+        parts.append("<b>{}</b>\n<pre>{}</pre>\n".format(lf.name, esc(tail[:1500])))
 
     text = "\n".join(parts)
     # Telegram message limit is ~4096 chars
@@ -707,9 +715,9 @@ async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         "{} <b>{}</b>".format(emoji, proj["name"]),
         "",
-        "\U0001f4c1 Path: <code>{}</code>".format(project_path),
+        "\U0001f4c1 Path: <code>{}</code>".format(esc(project_path)),
         "\u2705 Exists: {}".format("Yes" if exists else "NO"),
-        "\U0001f4dd Last commit: {}".format(commit),
+        "\U0001f4dd Last commit: {}".format(esc(commit)),
         "\U0001f4be Disk free: {}".format(disk),
         "\U0001f5c4 DB files: {}".format(db_info),
         "",
@@ -755,10 +763,10 @@ async def do_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\u2705 <b>Update Complete: {}</b>".format(proj["name"]),
         "",
         "<b>Git:</b>",
-        "<pre>{}\n{}</pre>".format(git_fetch[:500], git_reset[:500]),
+        "<pre>{}\n{}</pre>".format(esc(git_fetch[:500]), esc(git_reset[:500])),
         "",
         "<b>pip:</b>",
-        "<pre>{}</pre>".format(pip_result[:500]),
+        "<pre>{}</pre>".format(esc(pip_result[:500])),
         "",
         "\U0001f480 Killed PIDs: {}".format(killed if killed else "none"),
         "\U0001f680 Launched: {}".format("Yes" if launched else "FAILED"),
@@ -875,12 +883,12 @@ async def do_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\u23ea <b>Rollback Complete: {}</b>".format(proj["name"]),
         "",
         "<b>Git:</b>",
-        "<pre>{}</pre>".format(git_result[:500]),
+        "<pre>{}</pre>".format(esc(git_result[:500])),
         "",
-        "<b>Now at:</b> {}".format(commit),
+        "<b>Now at:</b> {}".format(esc(commit)),
         "",
         "<b>pip:</b>",
-        "<pre>{}</pre>".format(pip_result[:500]),
+        "<pre>{}</pre>".format(esc(pip_result[:500])),
         "",
         "\U0001f480 Killed: {}".format(killed if killed else "none"),
         "\U0001f680 Launched: {}".format("Yes" if launched else "FAILED"),
@@ -1147,6 +1155,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------------------------------------------------------
+# Global error handler
+# ---------------------------------------------------------------------------
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log any handler exception and tell the admin instead of failing silently.
+    The reply is plain text on purpose - the error text itself may contain
+    characters that HTML parse mode would choke on."""
+    logger.error("Handler exception: %s\n%s", context.error,
+                 "".join(traceback.format_exception(context.error)))
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Internal error (the action may still have run - check /status):\n"
+                "{}".format(context.error))
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 def main():
@@ -1191,6 +1217,9 @@ def main():
 
     # Callback handler for inline keyboards
     app.add_handler(CallbackQueryHandler(callback_handler))
+
+    # Last line of defense: log + report handler crashes instead of silence
+    app.add_error_handler(on_error)
 
     # Retry loop for transient network errors
     max_retries = 0
