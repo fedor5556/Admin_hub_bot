@@ -105,8 +105,12 @@ def read_env(path):
 
 _env = read_env(os.path.join(BASE_DIR, ".env"))
 ALERT_TOKEN = _env.get("ADMIN_BOT_TOKEN", "")
-ALERT_IDS = [x.strip() for x in _env.get("ADMIN_TELEGRAM_ID", "").split(",")
-             if x.strip().isdigit()]
+# Who gets DM'd. ALERT_TELEGRAM_ID notifies a SUBSET of admins (e.g. just you)
+# without touching anyone's admin powers - everyone in ADMIN_TELEGRAM_ID can
+# still run every command. When ALERT_TELEGRAM_ID is blank/absent, alerts fall
+# back to all admins (the previous behaviour).
+_alert_raw = _env.get("ALERT_TELEGRAM_ID", "").strip() or _env.get("ADMIN_TELEGRAM_ID", "")
+ALERT_IDS = [x.strip() for x in _alert_raw.split(",") if x.strip().isdigit()]
 
 
 def send_alert(text):
