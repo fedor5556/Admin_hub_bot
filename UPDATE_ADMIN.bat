@@ -1,5 +1,8 @@
 @echo off
-if "%~1"=="WORKER" goto :worker
+:: The TEMP copy recognizes itself by its file name - `start` mangles quoted
+:: bat paths that have arguments, so no arguments are passed at all; the
+:: worker gets HUB_DIR through the inherited environment instead.
+if /i "%~nx0"=="hub_update_worker.bat" goto :worker
 
 :: ===========================================================================
 ::  Hub self-update entry point. The real work runs from a TEMP copy of this
@@ -8,12 +11,17 @@ if "%~1"=="WORKER" goto :worker
 ::  running garbage. The copy is immune.
 :: ===========================================================================
 cd /d "%~dp0"
+set "HUB_DIR=%~dp0"
 copy /y "%~f0" "%TEMP%\hub_update_worker.bat" >nul
-start "Admin Control Hub - Update" "%TEMP%\hub_update_worker.bat" WORKER "%~dp0."
+start "Admin Control Hub - Update" "%TEMP%\hub_update_worker.bat"
 exit
 
 :worker
-set "HUB_DIR=%~2"
+if "%HUB_DIR%"=="" (
+    echo [ERROR] HUB_DIR not set - run UPDATE_ADMIN.bat from the Admin_hub folder.
+    pause
+    exit
+)
 cd /d "%HUB_DIR%"
 TITLE Admin Control Hub - Update
 
@@ -34,7 +42,7 @@ echo.
 
 :: Determine the correct Python executable
 set "PYTHON_CMD=python"
-if exist "%HUB_DIR%\venv\Scripts\python.exe" set "PYTHON_CMD=%HUB_DIR%\venv\Scripts\python.exe"
+if exist "%HUB_DIR%venv\Scripts\python.exe" set "PYTHON_CMD=%HUB_DIR%venv\Scripts\python.exe"
 
 :: 2. Update dependencies
 echo [INFO] Updating dependencies...
@@ -49,7 +57,7 @@ timeout /t 2 /nobreak >nul
 
 :: 4. Relaunch (runner hidden + Hub window)
 echo [INFO] Relaunching...
-start "" "%HUB_DIR%\START_SERVER.bat"
+start "" "%HUB_DIR%START_SERVER.bat"
 
 :: 5. Health check: wait up to ~90s for the Hub process to come back
 ::    (LAUNCH_ADMIN pip-checks before starting the bot, so allow time).
@@ -72,7 +80,7 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='py
 timeout /t 2 /nobreak >nul
 if not exist logs mkdir logs
 echo Update at %DATE% %TIME% failed health check; reverted to %OLD_SHA% > logs\update_rollback.flag
-start "" "%HUB_DIR%\START_SERVER.bat"
+start "" "%HUB_DIR%START_SERVER.bat"
 echo [ROLLBACK] Done. The runner will notify the admins on Telegram.
 timeout /t 5 /nobreak >nul
 exit
