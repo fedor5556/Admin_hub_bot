@@ -14,5 +14,13 @@
         "emoji": "🎙️",
         "scripts": ["main.py"],
         "env_keys": ["PUBLIC_BOT_TOKEN", "GROQ_API_KEY"]
+    },
+    "german": {
+        "name": "German Tutor Bot",
+        "path": "../German_Bot",
+        "repo": "https://github.com/fedor5556/German_Bot.git",
+        "emoji": "🇩🇪",
+        "scripts": ["german_bot.py"],
+        "env_keys": ["TELEGRAM_TOKEN", "OWNER_TELEGRAM_ID", "GEMINI_API_KEY"]
     }
 }

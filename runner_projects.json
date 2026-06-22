@@ -14,5 +14,12 @@
         "processes": [
             {"script": "src/main.py", "args": []}
         ]
+    },
+    "german": {
+        "name": "German Tutor Bot",
+        "path": "../German_Bot",
+        "processes": [
+            {"script": "german_bot.py", "args": []}
+        ]
     }
 }
