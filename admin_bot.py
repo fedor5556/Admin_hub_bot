@@ -291,6 +291,47 @@ def launch_project(proj: dict) -> bool:
         return False
 
 
+def _runner_marker_dir(proj: dict) -> str:
+    """The project's logs/ folder, where the central runner's control markers
+    live (logs/ is gitignored in every project, so markers never get committed)."""
+    return os.path.join(proj["path"], "logs")
+
+
+def signal_runner_stop(proj: dict) -> None:
+    """Tell the central runner this project is intentionally stopped, so it
+    never auto-restarts it. Best-effort: a marker failure must never block the
+    stop itself. See runner.py for the marker protocol."""
+    try:
+        marker_dir = _runner_marker_dir(proj)
+        os.makedirs(marker_dir, exist_ok=True)
+        start_marker = os.path.join(marker_dir, "runner.start")
+        if os.path.exists(start_marker):
+            os.remove(start_marker)
+        with open(os.path.join(marker_dir, "runner.stop"), "w", encoding="utf-8") as f:
+            f.write("stop requested via Admin Hub\n")
+    except OSError as exc:
+        logger.warning("Could not write runner stop marker for %s: %s", proj.get("name"), exc)
+
+
+def signal_runner_resume(proj: dict) -> None:
+    """Tell the central runner this project should be running again, clearing any
+    intentional-stop state. Without this, a project that was stopped once and
+    then Started/Restarted/Updated stays flagged 'stopped (intentional)' in the
+    heartbeat AND is no longer supervised for crashes. The Hub has already
+    launched the process; the runner adopts it instead of spawning a duplicate.
+    Best-effort: a marker failure must never block the launch."""
+    try:
+        marker_dir = _runner_marker_dir(proj)
+        os.makedirs(marker_dir, exist_ok=True)
+        stop_marker = os.path.join(marker_dir, "runner.stop")
+        if os.path.exists(stop_marker):
+            os.remove(stop_marker)
+        with open(os.path.join(marker_dir, "runner.start"), "w", encoding="utf-8") as f:
+            f.write("start/resume requested via Admin Hub\n")
+    except OSError as exc:
+        logger.warning("Could not write runner start marker for %s: %s", proj.get("name"), exc)
+
+
 def get_last_commit(project_path: str) -> str:
     """Get last git commit hash + message."""
     if not os.path.isdir(os.path.join(project_path, ".git")):
@@ -758,6 +799,8 @@ async def do_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Step 4: Relaunch
     launched = launch_project(proj)
+    if launched:
+        signal_runner_resume(proj)
 
     lines = [
         "\u2705 <b>Update Complete: {}</b>".format(proj["name"]),
@@ -788,19 +831,8 @@ async def do_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.callback_query.message if update.callback_query else update.message
 
     # Tell the central runner this stop is intentional, BEFORE killing, so it
-    # never auto-restarts the project. Markers live in logs/ because that
-    # folder is gitignored in every project. Best-effort: a marker failure
-    # must never block the stop itself.
-    try:
-        marker_dir = os.path.join(proj["path"], "logs")
-        os.makedirs(marker_dir, exist_ok=True)
-        start_marker = os.path.join(marker_dir, "runner.start")
-        if os.path.exists(start_marker):
-            os.remove(start_marker)
-        with open(os.path.join(marker_dir, "runner.stop"), "w", encoding="utf-8") as f:
-            f.write("stop requested via Admin Hub\n")
-    except OSError as exc:
-        logger.warning("Could not write runner stop marker for %s: %s", key, exc)
+    # never auto-restarts the project.
+    signal_runner_stop(proj)
 
     killed = kill_project_processes(key, proj)
     if killed:
@@ -823,6 +855,9 @@ async def do_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     already = check_scripts_running(proj)
     if already:
+        # Even when it is already up, make sure the runner is supervising it
+        # (it may be running with a stale intentional-stop flag).
+        signal_runner_resume(proj)
         await target.reply_text(
             "⚠️ <b>{}</b> is already running ({}).\nUse \U0001f504 Restart to relaunch it.".format(
                 proj["name"], ", ".join(already)),
@@ -832,6 +867,8 @@ async def do_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     launched = launch_project(proj)
+    if launched:
+        signal_runner_resume(proj)
     text = "▶️ <b>{}</b> {}".format(
         proj["name"], "started." if launched else "FAILED to start.")
     await target.reply_text(text, parse_mode="HTML")
@@ -850,6 +887,8 @@ async def do_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     killed = kill_project_processes(key, proj)
     await asyncio.sleep(2)
     launched = launch_project(proj)
+    if launched:
+        signal_runner_resume(proj)
 
     lines = [
         "\U0001f504 <b>Restart Complete: {}</b>".format(proj["name"]),

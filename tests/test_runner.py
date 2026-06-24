@@ -147,15 +147,31 @@ def test_stop_marker_stops_and_sticks(tmp_path, monkeypatch):
     assert calls["spawned"] == 0
 
 
-def test_start_marker_kills_fresh_then_spawns(tmp_path, monkeypatch):
+def test_start_marker_resumes_without_killing(tmp_path, monkeypatch):
+    # A start/resume marker re-enables supervision but must NOT kill or
+    # respawn: the Hub launches the process itself, so the runner only adopts
+    # the live one (here: nothing running) and leaves any started process be.
+    monkeypatch.setattr(runner, "list_python_processes", lambda: [])
     r, proj_dir, calls = _make_runner(tmp_path, monkeypatch)
     r.desired["proj"] = False
     (proj_dir / "logs" / "runner.start").write_text("start")
     r.process_markers()
-    assert r.desired["proj"] is True
-    assert calls["killed"] == 1   # fresh slate before spawning
+    assert r.desired["proj"] is True            # supervision resumed
+    assert calls["killed"] == 0                 # never nukes a freshly-launched process
+    assert calls["spawned"] == 0                # process_markers does not spawn; reconcile does
+    assert not (proj_dir / "logs" / "runner.start").exists()  # consumed
+
+
+def test_start_marker_then_reconcile_starts_if_dead(tmp_path, monkeypatch):
+    # If nothing is running when supervision resumes, the normal reconcile loop
+    # starts the project on its next pass.
+    monkeypatch.setattr(runner, "list_python_processes", lambda: [])
+    r, proj_dir, calls = _make_runner(tmp_path, monkeypatch)
+    r.desired["proj"] = False
+    (proj_dir / "logs" / "runner.start").write_text("start")
+    r.process_markers()
+    r.reconcile()
     assert calls["spawned"] == 1
-    assert not (proj_dir / "logs" / "runner.start").exists()
 
 
 def test_desired_state_survives_restart(tmp_path, monkeypatch):

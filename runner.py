@@ -11,14 +11,19 @@ Control protocol (file-based, no open ports - matching the server's
 no-inbound-network rule). Markers live in each project's logs/ folder
 because logs/ is gitignored everywhere:
 
-    <project>/logs/runner.start  ->  kill the project's processes, then start
-                                     them all hidden ("restart fresh")
+    <project>/logs/runner.start  ->  resume supervision (mark the project as
+                                     "should be running"). Does NOT kill: the
+                                     Hub launches the process itself, so the
+                                     runner just adopts the live one and never
+                                     spawns a duplicate. If nothing is running
+                                     yet, the normal reconcile loop starts it.
     <project>/logs/runner.stop   ->  kill the project's processes and leave
                                      them stopped (no auto-restart)
 
-The markers are written by each project's COMPLETE_LAUNCH.bat / STOP_ALL.bat
-and by the Admin Hub's /stop. The runner consumes (deletes) them. If both
-exist, the newer one wins.
+The markers are written by the Admin Hub: /stop writes runner.stop, while
+Start / Restart / Update / Rollback write runner.start so an intentionally
+stopped project starts being supervised again. The runner consumes (deletes)
+them. If both exist, the newer one wins.
 
 Restart policy: a managed process that dies WITHOUT a stop marker is treated
 as crashed and restarted after RESTART_DELAY seconds, at most MAX_RESTARTS
@@ -337,14 +342,15 @@ class Runner:
                 self._save_state()
                 kill_project_processes(proj)
                 self._forget(key)
-            else:  # start = restart fresh with a clean slate
-                kill_project_processes(proj)
-                self._forget(key)
+            else:  # start = resume supervision (the Hub already launched it)
                 self.desired[key] = True
                 self._save_state()
-                time.sleep(1)
-                for spec in proj["processes"]:
-                    self._spawn(key, proj, spec)
+                # Adopt the process the Hub just launched so reconcile sees it
+                # alive and never spawns a duplicate. If nothing is running yet,
+                # the normal reconcile loop starts it on the next pass. We never
+                # kill here: the Hub owns the launch (Restart/Update kill first
+                # themselves), so killing would nuke the freshly-started process.
+                self.adopt_scan()
 
     def _forget(self, key):
         for d in (self.children, self.adopted, self.death_time,
