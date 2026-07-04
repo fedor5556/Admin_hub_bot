@@ -22,5 +22,13 @@
         "emoji": "🇩🇪",
         "scripts": ["german_bot.py"],
         "env_keys": ["TELEGRAM_TOKEN", "OWNER_TELEGRAM_ID", "GEMINI_API_KEY"]
+    },
+    "warmship": {
+        "name": "Warm Ship (ferry tickets)",
+        "path": "../Warm_ship",
+        "repo": "https://github.com/fedor5556/Warm_ship.git",
+        "emoji": "🚢",
+        "scripts": ["bot.py"],
+        "env_keys": ["TELEGRAM_BOT_TOKEN", "ALLOWED_USERS", "ADMIN_USER_ID"]
     }
 }
