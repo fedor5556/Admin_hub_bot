@@ -786,8 +786,16 @@ async def do_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await target.reply_text("\U0001f680 <b>Deploying {}...</b>".format(proj["name"]), parse_mode="HTML")
     logger.info("UPDATE started for %s by user %s", key, update.effective_user.id)
 
+    # Step 0: bootstrap a first-time deploy — the folder (or its .git) may not
+    # exist yet. init+remote (not clone) so a pre-delivered .env survives.
+    repo_url = proj.get("repo", "")
+    os.makedirs(project_path, exist_ok=True)
+    if repo_url and not os.path.isdir(os.path.join(project_path, ".git")):
+        run_shell("git init -b main", cwd=project_path, timeout=15)
+        run_shell('git remote add origin "{}"'.format(repo_url), cwd=project_path, timeout=15)
+
     # Step 1: Git fetch + reset
-    git_fetch = run_shell("git fetch origin main", cwd=project_path, timeout=30)
+    git_fetch = run_shell("git fetch origin main", cwd=project_path, timeout=60)
     git_reset = run_shell("git reset --hard origin/main", cwd=project_path, timeout=15)
 
     # Step 2: pip install
