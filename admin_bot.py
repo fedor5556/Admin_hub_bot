@@ -1060,9 +1060,13 @@ async def do_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         zip_size_mb = os.path.getsize(zip_path) / (1024 ** 2)
         logger.info("Backup created: %s (%.1f MB)", zip_name, zip_size_mb)
 
-        # Send file (Telegram limit: 2 GB for bots)
-        if zip_size_mb > 2000:
-            await target.reply_text("\u274c Backup too large ({:.0f} MB). Telegram limit is 2 GB.".format(zip_size_mb))
+        # Send file. The Bot API upload cap is ~50 MB (2 GB is only for user
+        # clients / a local Bot API server) - over the cap the send just fails,
+        # so refuse early and point at the B2 path instead.
+        if zip_size_mb > 49:
+            await target.reply_text(
+                "\u274c Backup too large ({:.0f} MB) - bots can only SEND ~50 MB "
+                "via Telegram. Use /pushdb on the bus bot (B2 bucket) for big DBs.".format(zip_size_mb))
         else:
             await target.reply_document(
                 document=open(zip_path, "rb"),
