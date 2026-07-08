@@ -4,3 +4,5 @@ logs/
 __pycache__/
 *.pyc
 runner_state.json
+*.db
+data/
