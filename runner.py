@@ -52,6 +52,7 @@ import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REGISTRY_FILE = os.path.join(BASE_DIR, "runner_projects.json")
+PROJECTS_FILE = os.path.join(BASE_DIR, "projects.json")
 STATE_FILE = os.path.join(BASE_DIR, "runner_state.json")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 ROLLBACK_FLAG = os.path.join(LOG_DIR, "update_rollback.flag")
@@ -210,6 +211,41 @@ def validate_registry(raw, base_dir):
     return projects
 
 
+def load_registry():
+    """Read runner_projects.json and return (projects, pending_dirs).
+
+    projects: validated entries whose folder exists (see validate_registry).
+    pending_dirs: {key: abs_dir} for entries whose folder does NOT exist yet -
+    a first-time deploy registers the project before the Hub's Update
+    bootstraps the folder, so the runner re-checks these and picks the project
+    up the moment the folder appears (no runner restart needed).
+    Raises on unreadable/invalid JSON - callers decide how to degrade.
+    """
+    # utf-8-sig: humans edit this file, and Notepad/PowerShell write a BOM
+    with open(REGISTRY_FILE, "r", encoding="utf-8-sig") as f:
+        raw = json.load(f)
+    projects = validate_registry(raw, BASE_DIR)
+    pending = {}
+    for key, spec in raw.items():
+        if key.startswith("_") or key in projects:
+            continue
+        pending[key] = os.path.abspath(os.path.join(BASE_DIR, spec.get("path", key)))
+    return projects, pending
+
+
+def unsupervised_projects(managed_keys):
+    """Keys registered in the Hub's projects.json but absent from the runner's
+    own registry. These are the silent gaps that bit us once: the Hub can
+    start/stop such a project, but nothing restarts it after a crash or a
+    reboot. Best-effort - an unreadable projects.json returns []."""
+    try:
+        with open(PROJECTS_FILE, "r", encoding="utf-8-sig") as f:
+            hub_keys = [k for k in json.load(f) if not k.startswith("_")]
+    except (OSError, ValueError):
+        return []
+    return sorted(k for k in hub_keys if k not in managed_keys)
+
+
 def decide_marker(start_path, stop_path):
     """Return 'start', 'stop' or None from the marker files; newer one wins."""
     start_t = os.path.getmtime(start_path) if os.path.exists(start_path) else None
@@ -287,7 +323,7 @@ def kill_project_processes(proj):
 # Supervisor
 # ---------------------------------------------------------------------------
 class Runner:
-    def __init__(self, projects):
+    def __init__(self, projects, pending_dirs=None):
         self.projects = projects
         self.children = {}        # (key, base) -> Popen
         self.adopted = {}         # (key, base) -> pid (seen in last scan)
@@ -302,6 +338,11 @@ class Runner:
         self.hub_alive = True     # optimistic until the first scan says otherwise
         self.hub_dir_norm = norm_dir(BASE_DIR)
         self.desired = self._load_state()
+        self.pending_dirs = dict(pending_dirs or {})
+        try:
+            self.registry_mtime = os.path.getmtime(REGISTRY_FILE)
+        except OSError:
+            self.registry_mtime = None
 
     def _load_state(self):
         desired = {key: True for key in self.projects}  # autostart by default
@@ -357,6 +398,59 @@ class Runner:
                   self.restarts, self.cooldown_until):
             for k in [k for k in d if k[0] == key]:
                 del d[k]
+
+    # -- registry hot-reload --------------------------------------------------
+    def check_registry(self):
+        """Pick up runner_projects.json edits without a runner restart.
+
+        The registry used to be read once at startup, so a project registered
+        while the runner was already up was invisible to the reconcile loop
+        AND the heartbeat until the next /hub_update - exactly how a new bot
+        ended up unsupervised for weeks. Reload triggers: the file's mtime
+        changed, or a previously folder-less entry's folder appeared (first
+        deploys register before the Hub bootstraps the folder). A broken edit
+        keeps the last good registry."""
+        try:
+            mtime = os.path.getmtime(REGISTRY_FILE)
+        except OSError:
+            return
+        appeared = any(os.path.isdir(d) for d in self.pending_dirs.values())
+        if mtime == self.registry_mtime and not appeared:
+            return
+        changed = mtime != self.registry_mtime
+        self.registry_mtime = mtime
+        try:
+            projects, pending = load_registry()
+        except Exception as exc:
+            # Only report on an actual edit, once - not every 5 s poll.
+            if changed:
+                logger.error("Registry changed but is invalid - keeping the "
+                             "previous one: %s", exc)
+                send_alert("⚠️ runner_projects.json changed but could not be "
+                           "loaded ({}) - the runner kept the previous "
+                           "registry.".format(exc))
+            return
+        added = sorted(k for k in projects if k not in self.projects)
+        removed = sorted(k for k in self.projects if k not in projects)
+        self.projects = projects
+        self.pending_dirs = pending
+        if not added and not removed:
+            return
+        for key in removed:
+            self._forget(key)
+            self.desired.pop(key, None)
+        for key in added:
+            self.desired.setdefault(key, True)  # autostart, same as boot
+        self._save_state()
+        logger.info("Registry reloaded - added: %s, removed: %s, managing: %s",
+                    added or "-", removed or "-", sorted(self.projects))
+        send_alert("🔄 Runner registry reloaded.\nAdded: {}\nRemoved: {}\n"
+                   "Now managing: {}".format(
+                       ", ".join(added) or "-", ", ".join(removed) or "-",
+                       ", ".join(p["name"] for p in self.projects.values())))
+        # Adopt anything already running for the new projects right away so
+        # reconcile never double-starts them.
+        self.adopt_scan()
 
     # -- spawning & adoption --------------------------------------------------
     def _spawn(self, key, proj, spec):
@@ -422,6 +516,7 @@ class Runner:
         return True
 
     def reconcile(self):
+        self.check_registry()
         self.process_markers()
         if time.monotonic() - self.last_scan > ADOPT_SCAN_SECONDS:
             self.adopt_scan()
@@ -482,6 +577,13 @@ class Runner:
         lines.append("{} Admin Hub: {}".format(
             "✅" if self.hub_alive else "🔴",
             "running" if self.hub_alive else "DOWN"))
+        if self.pending_dirs:
+            lines.append("⏳ Registered, folder not deployed yet: {}".format(
+                ", ".join(sorted(self.pending_dirs))))
+        gaps = unsupervised_projects(set(self.projects) | set(self.pending_dirs))
+        if gaps:
+            lines.append("🚨 In projects.json but NOT supervised (add to "
+                         "runner_projects.json!): {}".format(", ".join(gaps)))
         try:
             free_gb = shutil.disk_usage(BASE_DIR).free / 1024 ** 3
             lines.append("💾 Disk free: {:.0f} GB".format(free_gb))
@@ -500,10 +602,7 @@ def main():
         return 0
 
     try:
-        # utf-8-sig: humans edit this file, and Notepad/PowerShell write a BOM
-        with open(REGISTRY_FILE, "r", encoding="utf-8-sig") as f:
-            raw = json.load(f)
-        projects = validate_registry(raw, BASE_DIR)
+        projects, pending = load_registry()
     except Exception as exc:
         logger.critical("Cannot load registry %s: %s", REGISTRY_FILE, exc)
         return 1
@@ -522,11 +621,19 @@ def main():
     except OSError:
         pass
 
-    send_alert("🟢 Runner started on {} - managing: {}".format(
+    start_lines = ["🟢 Runner started on {} - managing: {}".format(
         socket.gethostname(),
-        ", ".join(p["name"] for p in projects.values()) or "(nothing)"))
+        ", ".join(p["name"] for p in projects.values()) or "(nothing)")]
+    if pending:
+        start_lines.append("⏳ Registered, folder not deployed yet: {}".format(
+            ", ".join(sorted(pending))))
+    gaps = unsupervised_projects(set(projects) | set(pending))
+    if gaps:
+        start_lines.append("🚨 In projects.json but NOT supervised (add to "
+                           "runner_projects.json!): {}".format(", ".join(gaps)))
+    send_alert("\n".join(start_lines))
 
-    runner = Runner(projects)
+    runner = Runner(projects, pending)
     runner.adopt_scan()
 
     once = "--once" in sys.argv

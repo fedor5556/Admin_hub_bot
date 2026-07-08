@@ -184,6 +184,98 @@ def test_desired_state_survives_restart(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Registry hot-reload (new projects picked up without a runner restart)
+# ---------------------------------------------------------------------------
+def _write_registry(path, keys):
+    import json
+    path.write_text(json.dumps({
+        k: {"name": k.upper(), "path": k.upper(),
+            "processes": [{"script": "main.py", "args": []}]}
+        for k in keys
+    }), encoding="utf-8")
+
+
+def _make_reloading_runner(tmp_path, monkeypatch, keys=("a",)):
+    """A Runner wired to a real registry file in tmp_path, network-safe."""
+    for k in keys:
+        (tmp_path / k.upper() / "logs").mkdir(parents=True)
+    reg = tmp_path / "runner_projects.json"
+    _write_registry(reg, keys)
+    monkeypatch.setattr(runner, "BASE_DIR", str(tmp_path))
+    monkeypatch.setattr(runner, "REGISTRY_FILE", str(reg))
+    monkeypatch.setattr(runner, "PROJECTS_FILE", str(tmp_path / "projects.json"))
+    monkeypatch.setattr(runner, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(runner, "send_alert", lambda text: None)
+    monkeypatch.setattr(runner, "list_python_processes", lambda: [])
+    projects, pending = runner.load_registry()
+    return runner.Runner(projects, pending), reg
+
+
+def _touch_newer(path):
+    """Bump mtime past filesystem timestamp granularity."""
+    now = time.time() + 10
+    os.utime(path, (now, now))
+
+
+def test_registry_hot_reload_adds_project(tmp_path, monkeypatch):
+    r, reg = _make_reloading_runner(tmp_path, monkeypatch, keys=("a",))
+    assert set(r.projects) == {"a"}
+    (tmp_path / "B" / "logs").mkdir(parents=True)
+    _write_registry(reg, ("a", "b"))
+    _touch_newer(reg)
+    r.check_registry()
+    assert set(r.projects) == {"a", "b"}
+    assert r.desired["b"] is True  # autostarts like any boot-registered project
+
+
+def test_registry_hot_reload_removes_project(tmp_path, monkeypatch):
+    r, reg = _make_reloading_runner(tmp_path, monkeypatch, keys=("a", "b"))
+    _write_registry(reg, ("a",))
+    _touch_newer(reg)
+    r.check_registry()
+    assert set(r.projects) == {"a"}
+    assert "b" not in r.desired
+
+
+def test_registry_hot_reload_keeps_old_on_broken_edit(tmp_path, monkeypatch):
+    r, reg = _make_reloading_runner(tmp_path, monkeypatch, keys=("a",))
+    reg.write_text("{ this is not json", encoding="utf-8")
+    _touch_newer(reg)
+    r.check_registry()
+    assert set(r.projects) == {"a"}  # previous registry survives a bad edit
+
+
+def test_registry_pending_folder_appears(tmp_path, monkeypatch):
+    """A project registered before its folder exists (first-time deploy) is
+    picked up the moment the Hub's Update bootstraps the folder - with NO
+    registry mtime change and no runner restart."""
+    r, reg = _make_reloading_runner(tmp_path, monkeypatch, keys=("a",))
+    _write_registry(reg, ("a", "b"))  # b's folder does not exist yet
+    _touch_newer(reg)
+    r.check_registry()
+    assert set(r.projects) == {"a"}
+    assert set(r.pending_dirs) == {"b"}
+    (tmp_path / "B" / "logs").mkdir(parents=True)  # Update bootstraps the folder
+    r.check_registry()
+    assert set(r.projects) == {"a", "b"}
+    assert r.pending_dirs == {}
+
+
+def test_unsupervised_projects_flags_the_gap(tmp_path, monkeypatch):
+    import json
+    hub = tmp_path / "projects.json"
+    hub.write_text(json.dumps({"a": {}, "b": {}}), encoding="utf-8")
+    monkeypatch.setattr(runner, "PROJECTS_FILE", str(hub))
+    assert runner.unsupervised_projects({"a"}) == ["b"]
+    assert runner.unsupervised_projects({"a", "b"}) == []
+
+
+def test_unsupervised_projects_tolerates_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "PROJECTS_FILE", str(tmp_path / "nope.json"))
+    assert runner.unsupervised_projects(set()) == []
+
+
+# ---------------------------------------------------------------------------
 # Real spawn smoke test (hidden child, then kill it)
 # ---------------------------------------------------------------------------
 def test_spawn_process_hidden(tmp_path):

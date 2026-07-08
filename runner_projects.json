@@ -21,5 +21,12 @@
         "processes": [
             {"script": "german_bot.py", "args": []}
         ]
+    },
+    "warmship": {
+        "name": "Warm Ship (ferry tickets)",
+        "path": "../Warm_ship",
+        "processes": [
+            {"script": "bot.py", "args": []}
+        ]
     }
 }

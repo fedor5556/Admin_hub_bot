@@ -9,6 +9,7 @@ python-telegram-bot v22.6 | Windows 11 | Python 3.12+
 
 import asyncio
 import datetime
+import hashlib
 import html
 import json
 import logging
@@ -51,6 +52,7 @@ for _id in ADMIN_IDS_RAW.split(","):
 
 BOT_START_TIME = datetime.datetime.now()
 PROJECTS_JSON = os.path.join(BASE_DIR, "projects.json")
+RUNNER_PROJECTS_JSON = os.path.join(BASE_DIR, "runner_projects.json")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -442,6 +444,38 @@ def check_env_file(proj: dict):
     return (present, missing, None)
 
 
+def env_file_info(proj: dict):
+    """mtime / size / fingerprint of the project's .env - proof that a
+    delivered file actually landed, without ever surfacing a value. The
+    fingerprint is sha256 of the raw bytes, first 10 hex chars; the bus bot's
+    .env delivery reply shows the same fingerprint, so "what I sent" and
+    "what is on disk" can be compared at a glance. Returns None if there is
+    no readable .env."""
+    env_path = os.path.join(proj["path"], ".env")
+    try:
+        with open(env_path, "rb") as f:
+            raw = f.read()
+        mtime = os.path.getmtime(env_path)
+    except OSError:
+        return None
+    return {
+        "mtime": datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M"),
+        "size": len(raw),
+        "fp": hashlib.sha256(raw).hexdigest()[:10],
+    }
+
+
+def runner_registry_keys():
+    """Project keys the central runner supervises (runner_projects.json).
+    Returns None when the file is unreadable so callers can skip the
+    supervision warning instead of flagging everything."""
+    try:
+        with open(RUNNER_PROJECTS_JSON, "r", encoding="utf-8-sig") as f:
+            return {k for k in json.load(f) if not k.startswith("_")}
+    except (OSError, ValueError):
+        return None
+
+
 def read_log_tail(filepath: str, lines: int = 15) -> str:
     """Read last N lines of a log file.
 
@@ -533,6 +567,8 @@ async def cmd_hub_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
     ]
 
+    supervised = runner_registry_keys()
+
     for key, proj in projects.items():
         emoji = proj.get("emoji", "\u2699\ufe0f")
         path = proj["path"]
@@ -551,6 +587,9 @@ async def cmd_hub_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append("   {} Running: {}".format(status_icon, ", ".join(running)))
         else:
             lines.append("   {} No scripts running".format(status_icon))
+        if supervised is not None and key not in supervised:
+            lines.append("   \U0001f6a8 NOT supervised by the runner - add it to "
+                         "runner_projects.json (no crash-restart, no reboot autostart)")
         lines.append("")
 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -595,15 +634,26 @@ async def cmd_env_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = check_env_file(proj)
         if result is None:
             lines.append("⚪ {}: no env_keys defined in projects.json".format(proj["name"]))
-            continue
-        present, missing, err = result
-        if err:
-            lines.append("\U0001f534 {}: {} (need: {})".format(
-                proj["name"], err, ", ".join(missing)))
-        elif missing:
-            lines.append("\U0001f534 {}: MISSING {}".format(proj["name"], ", ".join(missing)))
         else:
-            lines.append("✅ {}: all {} required keys set".format(proj["name"], len(present)))
+            present, missing, err = result
+            if err:
+                lines.append("\U0001f534 {}: {} (need: {})".format(
+                    proj["name"], err, ", ".join(missing)))
+            elif missing:
+                lines.append("\U0001f534 {}: MISSING {}".format(proj["name"], ", ".join(missing)))
+            else:
+                lines.append("✅ {}: all {} required keys set".format(proj["name"], len(present)))
+        # File facts: after delivering a new .env, the changed mtime/size and a
+        # matching fingerprint are the proof it actually landed on disk.
+        info = env_file_info(proj)
+        if info:
+            lines.append("   ↳ modified {} · {} bytes · fingerprint <code>{}</code>".format(
+                info["mtime"], info["size"], info["fp"]))
+        lines.append("")
+    lines.append("Fingerprint = sha256 of the file, first 10 chars. The bus bot "
+                 "replies with the same fingerprint when you DM it a .env - if "
+                 "they match, the delivered file is the one on disk. Restart the "
+                 "project to apply a new .env.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
@@ -753,12 +803,18 @@ async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disk = get_disk_free(project_path) if exists else "N/A"
     db_info = get_db_total_size(project_path) if exists else "N/A"
 
+    env_info = env_file_info(proj) if exists else None
+    env_line = ("\U0001f511 .env: modified {} \u00b7 {} bytes \u00b7 fingerprint <code>{}</code>".format(
+        env_info["mtime"], env_info["size"], env_info["fp"])
+        if env_info else "\U0001f511 .env: none found")
+
     lines = [
         "{} <b>{}</b>".format(emoji, proj["name"]),
         "",
         "\U0001f4c1 Path: <code>{}</code>".format(esc(project_path)),
         "\u2705 Exists: {}".format("Yes" if exists else "NO"),
         "\U0001f4dd Last commit: {}".format(esc(commit)),
+        env_line,
         "\U0001f4be Disk free: {}".format(disk),
         "\U0001f5c4 DB files: {}".format(db_info),
         "",
@@ -768,6 +824,11 @@ async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("\u2705 Running: {}".format(", ".join(running)))
     else:
         lines.append("\u26a0\ufe0f No scripts currently running")
+
+    supervised = runner_registry_keys()
+    if supervised is not None and key not in supervised:
+        lines.append("\U0001f6a8 NOT supervised by the runner - add it to "
+                     "runner_projects.json (no crash-restart, no reboot autostart)")
 
     text = "\n".join(lines)
     target = update.callback_query.message if update.callback_query else update.message
