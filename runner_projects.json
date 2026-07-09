@@ -28,5 +28,12 @@
         "processes": [
             {"script": "bot.py", "args": []}
         ]
+    },
+    "userbot": {
+        "name": "Transcriber Userbot",
+        "path": "../Transcriber_userbot",
+        "processes": [
+            {"script": "src/main.py", "args": []}
+        ]
     }
 }
