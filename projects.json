@@ -34,7 +34,7 @@
     "userbot": {
         "name": "Transcriber Userbot",
         "path": "../Transcriber_userbot",
-        "repo": "https://github.com/fedor5556/Transcriber_userbot.git",
+        "repo": "https://github.com/fedor5556/getting_messages_across.git",
         "emoji": "🎤",
         "scripts": ["main.py"],
         "env_keys": ["API_ID", "API_HASH", "SESSION_STRING", "COMPANION_BOT_TOKEN", "GROQ_API_KEY", "ALLOWED_CHATS"]
